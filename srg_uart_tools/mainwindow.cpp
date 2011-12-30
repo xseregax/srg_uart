@@ -1,26 +1,6 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 
-
-#pragma pack(push)
-#pragma pack(1)
-typedef struct {
-    uint8_t header;
-
-    uint8_t type;
-    uint16_t value1;
-    uint16_t value2;
-    uint16_t value3;
-    uint16_t value4;
-
-    uint8_t crc;
-} TPCInfo;
-#pragma pack(pop)
-
-#define PCINFO_HEADER 0xDE
-#define PCINFO_TYPE_IRON 0x01
-#define PCINFO_TYPE_PRINT 0x05
-
 uint8_t _crc_ibutton_update(uint8_t crc, uint8_t data) {
     uint8_t i;
     crc = crc ^ data;
@@ -33,23 +13,56 @@ uint8_t _crc_ibutton_update(uint8_t crc, uint8_t data) {
     return crc;
 }
 
-uint8_t check_uart_info(TPCInfo *info) {
+uint8_t check_uart_info(TPCHeader *head, void *data) {
 
-    if(info->header != PCINFO_HEADER)
+    if(head->header != PCINFO_HEADER)
         return 0;
 
-    uint8_t i, crc = 0;
+    if((head->sign ^ PCINFO_HEADER) != head->len)
+        return 0;
 
-    uint8_t *p = (uint8_t *)info;
-    for(i = 0; i < sizeof(TPCInfo) - 1; i++)
+    uint8_t i, *p, crc = head->type;
+
+    p = (uint8_t *)data;
+    for(i = 0; i < head->len; i++)
         crc = _crc_ibutton_update(crc, p[i]);
 
-    if(info->crc != crc)
+    if(head->crc != crc)
         return 0;
 
     return 1;
 }
 
+
+QByteArray send_uart_msg(TPCHeadType type, void *data, uint8_t len) {
+    TPCHeader head;
+
+    head.header = PCINFO_HEADER;
+    head.sign = PCINFO_HEADER ^ len;
+    head.len = len;
+
+    head.type = type;
+
+    uint8_t i, *p, crc = type;
+
+    p = (uint8_t*)data;
+    for(i = 0; i < len; i++)
+        crc = _crc_ibutton_update(crc, p[i]);
+
+    head.crc = crc;
+
+    QByteArray cmd;
+
+    p = (uint8_t*)&head;
+    for(i = 0; i < sizeof(TPCHeader); i++)
+        cmd.append(p[i]);
+
+    p = (uint8_t*)data;
+    for(i = 0; i < len; i++)
+        cmd.append(p[i]);
+
+    return cmd;
+}
 
 
 
@@ -98,9 +111,6 @@ void MainWindow::on_pbPortOpen_clicked()
 
       toOutput("Port " + m_port->portName() + " closed<br><br>");
 
-      ui->gbCommands->setEnabled(false);
-      ui->gbOutput->setEnabled(false);
-
   }
   else {
       QString index = ui->cbSpeeds->currentText();
@@ -132,9 +142,6 @@ void MainWindow::on_pbPortOpen_clicked()
       if(m_port->open(QIODevice::ReadWrite) == true) {
           ui->pbPortOpen->setText("Close");
           ui->lbPortStatus->setText("<span style=color:green>open</span>");
-
-          ui->gbCommands->setEnabled(true);
-          ui->gbOutput->setEnabled(true);
 
           connect(m_port, SIGNAL(readyRead()), this, SLOT(onReadyRead()));
 
@@ -182,19 +189,35 @@ void MainWindow::onReadyRead()
     if(index > 0)
         m_uart_rx.remove(0, index);
 
-    if(m_uart_rx.size() < sizeof(TPCInfo))
+    if((uint)m_uart_rx.size() < sizeof(TPCHeader))
         return;
 
-    TPCInfo info;
+    TPCHeader head;
+
     uint8_t i;
-    uint8_t *p = (uint8_t *)&info;
-    for(i = 0; i < sizeof(TPCInfo); i++)
+
+    uint8_t *p = (uint8_t *)&head;
+    for(i = 0; i < sizeof(TPCHeader); i++)
         p[i] = m_uart_rx.at(i);
 
-    m_uart_rx.remove(0, sizeof(TPCInfo));
-
-    if(!check_uart_info(&info))
+    if((head.sign ^ PCINFO_HEADER) != head.len || head.len > 100) {
+        m_uart_rx.remove(0, 1); //skip invalid PCINFO_HEADER
         return;
+    }
+
+    if((uint)m_uart_rx.size() < sizeof(TPCHeader) + head.len)
+        return;
+
+    uint8_t buf[head.len];
+    for(i = 0; i < head.len; i++)
+        buf[i] = m_uart_rx.at(sizeof(TPCHeader) + i);
+
+    if(!check_uart_info(&head, buf)) {
+        m_uart_rx.remove(0, 1); //skip invalid PCINFO_HEADER
+        return;
+    }
+
+    m_uart_rx.remove(0, sizeof(TPCHeader) + head.len);
 
     /*
         QString str;
@@ -203,18 +226,24 @@ void MainWindow::onReadyRead()
     */
 
 
-    if(info.type == PCINFO_TYPE_IRON) {
+    if(head.type == HI_IRON) {
+
+        TPCTempInfo *info = (TPCTempInfo*)buf;
+
         //log.append("X = " + NUM(m_uart_timer.elapsed() / 1000.0) + "; Y = "  + NUM(info.value) + '\n');
 
         quint64 timer = m_uart_timer.elapsed() / 1000.0;
 
         m_uart_temp_x.append(timer);
-        m_uart_temp_y.append(info.value1);
+        m_uart_temp_y.append(info->temp);
 
         m_uart_pwm_x.append(timer);
-        m_uart_pwm_y.append(info.value2);
+        m_uart_pwm_y.append(info->power);
 
-        m_marker_need_temp->setValue(0, info.value3);
+        m_marker_need_temp->setValue(0, info->temp_need);
+
+        ui->lblTemp->setText(NUM(info->temp) + " / " + NUM(info->temp_need) + QString::fromUtf8(" °C"));
+        ui->lblPower->setText(NUM(info->power) + " %");
 
         draw_plot();
     }
@@ -252,54 +281,81 @@ void MainWindow::on_pbCmd_clicked()
 void MainWindow::init_plot(void) {
     ui->qwtPlot->setTitle(QString::fromUtf8("Зависимость T(t)"));
 
-    m_legend = new QwtLegend();
-    m_legend->setItemMode(QwtLegend::ReadOnlyItem);
-    ui->qwtPlot->insertLegend(m_legend, QwtPlot::BottomLegend);
-
-    m_grid = new QwtPlotGrid;
-    m_grid->enableXMin(true);
-
-    m_grid->setMajPen(QPen(Qt::black, 0, Qt::DotLine));
-    m_grid->setMinPen(QPen(Qt::gray, 0, Qt::DotLine));
-    m_grid->attach(ui->qwtPlot);
-
     ui->qwtPlot->enableAxis(QwtPlot::yLeft, true);
     ui->qwtPlot->enableAxis(QwtPlot::yRight, true);
     ui->qwtPlot->enableAxis(QwtPlot::xBottom, true);
 
     ui->qwtPlot->setAxisTitle(QwtPlot::xBottom, QString::fromUtf8("t, сек"));
-    //ui->qwtPlot->setAxisScale(QwtPlot::xBottom, 0, 100);
-
     ui->qwtPlot->setAxisTitle(QwtPlot::yLeft, QString::fromUtf8("Temp, °C"));
-    ui->qwtPlot->setAxisScale(QwtPlot::yLeft, 0, 400);
-
     ui->qwtPlot->setAxisTitle(QwtPlot::yRight, QString::fromUtf8("Pow, %"));
-    ui->qwtPlot->setAxisScale(QwtPlot::yRight, 0, 300);
+
+
+#if PLOT_AUTOSCALE == 1
+    ui->qwtPlot->setAxisAutoScale(QwtPlot::yLeft);
+    ui->qwtPlot->setAxisAutoScale(QwtPlot::yRight);
+    ui->qwtPlot->setAxisAutoScale(QwtPlot::xBottom);
+#else
+    ui->qwtPlot->setAxisScale(QwtPlot::xBottom, 0, 500);
+    ui->qwtPlot->setAxisScale(QwtPlot::yLeft, 0, 400);
+    ui->qwtPlot->setAxisScale(QwtPlot::yRight, 0, 100);
+#endif
+
+    ui->qwtPlot->canvas()->setCursor(Qt::ArrowCursor);
+
+    ui->qwtPlot->setAutoReplot(true);
+
+
+    m_zoom = new QwtChartZoom(ui->qwtPlot);
+    m_zoom->setRubberBandColor(Qt::white);
+
+    /*
+    m_legend = new QwtLegend();
+    m_legend->setItemMode(QwtLegend::ReadOnlyItem);
+    ui->qwtPlot->insertLegend(m_legend, QwtPlot::BottomLegend);
+    */
+
+    m_grid = new QwtPlotGrid;
+    m_grid->enableX(true);
+    m_grid->enableXMin(true);
+    m_grid->enableY(true);
+    m_grid->enableYMin(false);
+    m_grid->setMajPen(QPen(Qt::black, 0, Qt::DotLine));
+    m_grid->setMinPen(QPen(Qt::gray, 0, Qt::DotLine));
+    m_grid->setItemAttribute(QwtPlotGrid::AutoScale, true);
+    m_grid->attach(ui->qwtPlot);
+
+
+    m_picker = new QwtPlotPicker(QwtPlot::xBottom, QwtPlot::yLeft,
+        QwtPlotPicker::CrossRubberBand, QwtPicker::AlwaysOn, ui->qwtPlot->canvas());
+    m_picker->setStateMachine(new QwtPickerDragPointMachine());
+    m_picker->setRubberBandPen(QColor(Qt::green));
+    m_picker->setRubberBand(QwtPicker::CrossRubberBand);
+    m_picker->setTrackerPen(QColor(Qt::blue));
+
 
     m_curv_temp = new QwtPlotCurve(QString::fromUtf8("T1(t)"));
+    m_curv_temp->setStyle(QwtPlotCurve::Lines);
     m_curv_temp->setRenderHint(QwtPlotItem::RenderAntialiased);
     m_curv_temp->setYAxis(QwtPlot::yLeft);
     m_curv_temp->setXAxis(QwtPlot::xBottom);
     m_curv_temp->setPen(QPen(Qt::blue));
 
-    //m_curv_temp->setItemAttribute(QwtPlotItem::AutoScale, true);
+    m_curv_temp->attach(ui->qwtPlot);
 
-   /* m_symbol1 = new QwtSymbol();
-    m_symbol1->setStyle(QwtSymbol::Ellipse);
-    m_symbol1->setPen(QColor(Qt::black));
-    m_symbol1->setSize(4);
-    m_curv1->setSymbol(m_symbol1);
-    */
+    m_curv_temp->setSymbol(new QwtSymbol(QwtSymbol::Ellipse, Qt::NoBrush,
+            QPen(Qt::black), QSize(2, 2) ) );
 
     m_curv_pwm = new QwtPlotCurve(QString::fromUtf8("T2(t)"));
+    m_curv_pwm->setStyle(QwtPlotCurve::Lines);
     m_curv_pwm->setRenderHint(QwtPlotItem::RenderAntialiased);
     m_curv_pwm->setYAxis(QwtPlot::yRight);
     m_curv_pwm->setXAxis(QwtPlot::xBottom);
     m_curv_pwm->setPen(QPen(Qt::darkGreen));
 
-    //m_curv_pwm->setItemAttribute(QwtPlotItem::AutoScale, true);
+    m_curv_pwm->attach(ui->qwtPlot);
 
-
+    m_curv_pwm->setSymbol(new QwtSymbol(QwtSymbol::Ellipse, Qt::NoBrush,
+            QPen(Qt::green), QSize(2, 2) ) );
 
     m_marker_need_temp = new QwtPlotMarker();
     m_marker_need_temp->setValue(0.0, 0.0);
@@ -310,27 +366,6 @@ void MainWindow::init_plot(void) {
     m_marker_need_temp->setXAxis(QwtPlot::xBottom);
     m_marker_need_temp->attach(ui->qwtPlot);
 
-
-    m_zoom = new QwtChartZoom(ui->qwtPlot);
-    m_zoom->setRubberBandColor(Qt::white);
-
-    ui->qwtPlot->canvas()->setCursor(Qt::ArrowCursor);
-
-    m_curv_temp->attach(ui->qwtPlot);
-    m_curv_pwm->attach(ui->qwtPlot);
-
-    ui->qwtPlot->setAutoReplot(true);
-
-    //ui->qwtPlot->setAxisAutoScale(QwtPlot::yRight);
-    //ui->qwtPlot->setAxisAutoScale(QwtPlot::yLeft);
-
-
-    m_picker = new QwtPlotPicker(QwtPlot::xBottom, QwtPlot::yLeft,
-        QwtPlotPicker::CrossRubberBand, QwtPicker::AlwaysOn, ui->qwtPlot->canvas());
-    m_picker->setStateMachine(new QwtPickerDragPointMachine());
-    m_picker->setRubberBandPen(QColor(Qt::green));
-    m_picker->setRubberBand(QwtPicker::CrossRubberBand);
-    m_picker->setTrackerPen(QColor(Qt::blue));
 
 
     m_uart_timer.start();
@@ -356,11 +391,6 @@ void MainWindow::destroy_plot(void) {
 void MainWindow::draw_plot(void) {
     m_curv_temp->setRawSamples(m_uart_temp_x.constData(), m_uart_temp_y.constData(), m_uart_temp_x.size());
     m_curv_pwm->setRawSamples(m_uart_pwm_x.constData(), m_uart_pwm_y.constData(), m_uart_pwm_x.size());
-
-
-    if(m_uart_pwm_x.size() > 10000)
-        this->on_btnClear_clicked();
-
 }
 
 void MainWindow::on_btnClear_clicked()
@@ -373,7 +403,49 @@ void MainWindow::on_btnClear_clicked()
     m_uart_pwm_x.clear();
     m_uart_pwm_y.clear();
 
-    ui->qwtPlot->setAxisScale(QwtPlot::xBottom, 0, 50);
-
     draw_plot();
+
+    on_btnResetZoom_clicked();
+}
+
+void MainWindow::on_btnResetZoom_clicked()
+{
+    m_zoom->resetZoom();
+
+#if PLOT_AUTOSCALE == 1
+    ui->qwtPlot->setAxisAutoScale(QwtPlot::yLeft);
+    ui->qwtPlot->setAxisAutoScale(QwtPlot::yRight);
+    ui->qwtPlot->setAxisAutoScale(QwtPlot::xBottom);
+#else
+    ui->qwtPlot->setAxisScale(QwtPlot::xBottom, 0, 500);
+    ui->qwtPlot->setAxisScale(QwtPlot::yLeft, 0, 400);
+    ui->qwtPlot->setAxisScale(QwtPlot::yRight, 0, 100);
+#endif
+}
+
+void MainWindow::send_pid_params(TPCHeadType type, uint16_t value) {
+    QByteArray cmd = send_uart_msg(type, &value, sizeof(uint16_t));
+
+    QString str, log;
+    str = bytesToString(cmd);
+    log.append("SEND: " + str + "\n");
+    if(log.size()) toOutput(log);
+
+    m_port->write(cmd);
+    m_port->flush();
+}
+
+void MainWindow::on_spPID_P_valueChanged(int arg1)
+{
+    send_pid_params(HI_PID_P, (uint16_t)arg1);
+}
+
+void MainWindow::on_spPID_I_valueChanged(int arg1)
+{
+    send_pid_params(HI_PID_I, (uint16_t)arg1);
+}
+
+void MainWindow::on_spPID_D_valueChanged(int arg1)
+{
+    send_pid_params(HI_PID_D, (uint16_t)arg1);
 }

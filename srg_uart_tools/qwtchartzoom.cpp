@@ -443,3 +443,16 @@ void QwtChartZoom::restBounds()
     // перерисовываем график
     qwtp->replot();
 }
+
+void QwtChartZoom::resetZoom() {
+    if (convType == ctWheel) {
+
+    } else
+    if (convType == ctZoom)
+    {
+        restCursor();
+        delete zwid;
+    }
+
+    convType = ctNone;
+}

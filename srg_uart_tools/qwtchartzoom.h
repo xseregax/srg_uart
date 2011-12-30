@@ -39,6 +39,7 @@ public:
     // при вращении колеса мыши
     void setWheelFactor(double);
 
+    void resetZoom();
 protected:
     // обработчик всех событий
     bool eventFilter(QObject *,QEvent *);

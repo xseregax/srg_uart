@@ -38,6 +38,39 @@ typedef quint16 uint16_t;
 #define NUM(x) QString::number(x)
 
 
+//*****************************************
+#define PCINFO_HEADER 0xAD
+
+#pragma pack(push)
+#pragma pack(1)
+
+typedef struct {
+    uint8_t header;
+    uint8_t sign;
+    uint8_t len;
+    uint8_t crc;
+    uint8_t type;
+} TPCHeader;
+
+
+//HI_IRON
+typedef struct {
+    uint16_t adc;
+    uint16_t temp;
+    uint16_t temp_need;
+    uint8_t power;
+} TPCTempInfo;
+
+
+#pragma pack(pop)
+
+
+typedef enum { HI_ZERO = 0, HI_MSG, HI_IRON, HI_PID_P, HI_PID_I, HI_PID_D } TPCHeadType;
+
+//*****************************************
+
+#define PLOT_AUTOSCALE 0
+
 namespace Ui {
     class MainWindow;
 }
@@ -60,6 +93,14 @@ private slots:
     void on_pbCmd_clicked();
 
     void on_btnClear_clicked();
+
+    void on_btnResetZoom_clicked();
+
+    void on_spPID_P_valueChanged(int arg1);
+
+    void on_spPID_I_valueChanged(int arg1);
+
+    void on_spPID_D_valueChanged(int arg1);
 
 private:
     Ui::MainWindow *ui;
@@ -99,6 +140,8 @@ private:
 
 
     QByteArray m_uart_rx;
+
+    void send_pid_params(TPCHeadType type, uint16_t value);
 };
 
 #endif // MAINWINDOW_H
